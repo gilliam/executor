@@ -68,7 +68,7 @@ def main():
     service_registry_cluster_nodes = options.registry_nodes.split(',')
     discovery = ServiceRegistryClient(clock, service_registry_cluster_nodes)
     docker = DockerClient()
-    runtime = PlatformRuntime()
+    runtime = partial(PlatformRuntime, discovery)
     store = ContainerStore(partial(Container, docker, runtime, discovery,
                                    options.host))
     app = App(clock, store)

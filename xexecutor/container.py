@@ -1,38 +1,98 @@
 from contextlib import contextmanager
 import logging
 import shlex
+import random
 
 from gevent.event import Event
+from gevent.wsgi import WSGIServer
 import gevent
 import six
 import shortuuid
 import json
+
+from xexecutor.proxy import ProxyApp
+
+_DOCKER_GATEWAY = '172.17.42.1'
 
 
 def _convert_environment_dict_to_array(environment):
     return ['%s=%s' % (k, v) for (k, v) in environment.items()]
 
 
+class _ProxyResolver(object):
+    """Class that resolves host names for the proxy."""
+
+    def __init__(self, registry):
+        self.registry = registry
+        self._form_caches = {}
+
+    def _resolve(self, host, port):
+        """Resolve host and port."""
+        parts = host.split('.')
+        if len(parts) != 3:
+            raise ValueError("expected format <service>.<formation>.service")
+        service, form_name = parts[:2]
+        if not form_name in self._form_caches:
+            self._form_caches[form_name] = self.registry.formation_cache(
+                form_name)
+        instances = [inst for inst in self._form_caches[form_name].query().values()
+                     if inst['service'] == service]
+        if not instances:
+            raise ValueError("no instances")
+
+        instance = random.choice(instances)
+        if str(port) not in instance['ports']:
+            raise ValueError("instance do not expose port")
+        
+        netloc = '%s:%s' % (instance['host'], instance['ports'][str(port)])
+        print "Resolved to %s" % (netloc,)
+        return netloc
+
+    def __call__(self, netloc):
+        print "try to resolve %s" % (netloc,)
+        try:
+            host, port = netloc.split(':', 1)
+        except ValueError:
+            host, port = netloc, 80
+        if not host.endswith('.service'):
+            return netloc
+        return self._resolve(host, port)
+
+
 class PlatformRuntime(object):
 
-    def __init__(self):
-        pass
+    def __init__(self, registry, container):
+        self.registry = registry
+        self.container = container
+        self._resolve = _ProxyResolver(self.registry)
+        self._init()
 
-    def make_config_for_container(self, container):
+    def _init(self):
+        self._proxy = WSGIServer(('', 0), ProxyApp(self._resolve))
+        self._proxy.start()
+
+    def dispose(self):
+        self._proxy.stop()
+    
+    def make_config(self):
         """Given a L{Container}, construct a Docker config."""
-        return self._container_config(container.image, container.command,
-            hostname=container.instance, environment=self._make_environment(
-                container.env or {}, container))
+        return self._container_config(self.container.image,
+            self.container.command, hostname=self.container.instance,
+            environment=self._make_environment())
 
-    def _make_environment(self, environment, container):
+    def _make_environment(self):
+        proxy_netloc = '%s:%d' % (_DOCKER_GATEWAY, self._proxy.server_port)
+        environment = self.container.env or {}
         environment = environment.copy()
         environment.update({
-                'GILLIAM_FORMATION': container.formation,
-                'GILLIAM_SERVICE': container.service,
-                'GILLIAM_INSTANCE': container.instance
+                'GILLIAM_FORMATION': self.container.formation,
+                'GILLIAM_SERVICE': self.container.service,
+                'GILLIAM_INSTANCE': self.container.instance,
+                'HTTP_PROXY': proxy_netloc,
+                'http_proxy': proxy_netloc,
+                'HTTPS_PROXY': proxy_netloc
                 })
         return _convert_environment_dict_to_array(environment)
-
 
     def _container_config(self, image, command, hostname=None, user=None,
                           detach=False, stdin_open=False, tty=False, mem_limit=0,
@@ -94,6 +154,7 @@ class Container(object):
         self._stopped = Event()
         self._cont_id = None
         self._registration = None
+        self._runtime = None
 
     def start(self):
         gevent.spawn(self._provision_and_start)
@@ -131,11 +192,13 @@ class Container(object):
         with self._update_state('done'):
             self._registration.stop(timeout=10)
             self.docker.kill(cont_id)
+            self._runtime.dispose()
 
     def _create_container(self):
         """Create container."""
+        self._runtime = self.runtime(self)
         result = self.docker.create_container_from_config(
-            self.runtime.make_config_for_container(self))
+            self._runtime.make_config())
         self._cont_id = result['Id']
         self.docker.start(self._cont_id)
 

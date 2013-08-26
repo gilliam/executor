@@ -66,11 +66,13 @@ class _FormationCache(object):
         self.factory = factory
         self.interal = interval
         self._gthread = None
-        self._cache = cache
+        self._cache = {}
         self._stopped = Event()
+        self._running = Event()
 
     def start(self):
         self._gthread = gevent.spawn(self._loop)
+        self._running.wait(timeout=0.1)
         return self
 
     def stop(self, timeout=None):
@@ -84,6 +86,7 @@ class _FormationCache(object):
     def _loop(self):
         while not self._stopped.isSet():
             self._update()
+            self._running.set()
             self._stopped.wait(self.interval)
 
     def query(self):
@@ -138,11 +141,11 @@ class ServiceRegistryClient(object):
         """
         response = self._request('GET', '/%s' % (form_name,))
         response.raise_for_status()
-        for key, data in response.json():
+        for key, data in response.json().items():
             yield (key, factory(data))
 
-    def formation_cache(self, form_name):
+    def formation_cache(self, form_name, factory=dict, interval=15):
         """Return a cache for a specific formation that will be kept
         up to date until stopped.
         """
-        return _FormationCache(self, form_name).start()
+        return _FormationCache(self, form_name, factory, interval).start()

@@ -1,0 +1,3 @@
+#!/usr/bin/env python
+from xexecutor import script
+script.main()

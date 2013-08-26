@@ -64,7 +64,7 @@ class _FormationCache(object):
         self.client = client
         self.form_name = form_name
         self.factory = factory
-        self.interal = interval
+        self.interval = interval
         self._gthread = None
         self._cache = {}
         self._stopped = Event()

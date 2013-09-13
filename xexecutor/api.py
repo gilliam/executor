@@ -24,7 +24,7 @@ import gevent
 
 
 def _build_cont(url, container):
-    """Build a proc representation.
+    """Build a container representation.
 
     @param url: URL generator.
 
@@ -42,39 +42,121 @@ def _build_cont(url, container):
                 status_code=container.status_code)
 
 
+def _build_proc(url, proc):
+    """Build a proc representation.
+
+    @param url: URL generator.
+
+    @return: C{dict}
+    """
+    return dict(id=proc.id,
+                formation=proc.formation,
+                env=proc.env,
+                image=proc.image,
+                command=proc.command,
+                state=proc.state,
+                reason=proc.reason,
+                status=proc.status_code)
+
+
+class RunResource(object):
+    """Resource for 'one off' processes."""
+
+    def __init__(self, log, store):
+        self.log = log
+        self.store = store
+
+    def create(self, request, url):
+        """Create new container."""
+        data = self._assert_request_data(request, 'image', 'command',
+            'formation')
+        container = self.store.create(data['image'], data['command'],
+            data.get('env', {}), data['formation']).start()
+        response = Response(json=_build_proc(url, container), status=201)
+        response.headers.add('Location', url('run', id=container.id,
+                                             qualified=True))
+        return response
+
+    def attach(self, request, url, id):
+        container = self._get(id)
+        app_iter = container.attach(request.body_file)
+        response = Response(status=200)
+        response.app_iter = app_iter
+        return response
+
+    def commit(self, request, url, id):
+        container = self._get(id)
+        data = self._assert_request_data(request, 'repository')
+        container.commit(data['repository'], data.get('tag'))
+        return Response(status=204)
+
+    def index(self, request, url):
+        """Return a representation of all procs."""
+        collection = {}
+        for id, container in self.store.index():
+            collection[id] = _build_proc(url, container)
+        return Response(json=collection, status=200)
+
+    def show(self, request, url, id):
+        """Return a presentation of a proc."""
+        return Response(json=_build_proc(url, self._get(id)), status=200)
+
+    def delete(self, request, url, id):
+        """Stop and delete process."""
+        container = self._get(id)
+        self.store.remove(container.id)
+        container.dispose()
+        return Response(status=204)
+
+    def _assert_request_data(self, request, *required):
+        if not request.json:
+            raise HTTPBadRequest()
+        data = request.json
+        for key in required:
+            if not key in data:
+                raise HTTPBadRequest()
+        return data
+
+    def _get(self, id):
+        """Return container with given ID or C{None}."""
+        container = self.store.lookup(id)
+        if container is None:
+            raise HTTPNotFound()
+        return container
+
+
 class ContResource(object):
     """Resource for our processes."""
 
-    def __init__(self, log, url, store):
+    def __init__(self, log, store):
         self.log = log
-        self.url = url
         self.store = store
 
-    def create(self, request):
+    def create(self, request, url):
         """Create new container."""
         data = self._assert_request_data(request, 'image', 'command',
             'formation', 'service', 'instance')
         container = self.store.create(data['image'], data['command'],
             data.get('env', {}), data['formation'], data['service'],
             data['instance']).start()
-        response = Response(json=_build_cont(self.url, container), status=201)
-        response.headers.add('Location', self.url('container', id=container.id,
-                                                  qualified=False))
+        response = Response(json=_build_cont(url, container), status=201)
+        response.headers.add('Location', url('container', id=container.id,
+                                             qualified=True))
         return response
 
-    def index(self, request):
+    def index(self, request, url):
         """Return a representation of all procs."""
         collection = {}
         for id, container in self.store.index():
-            collection[id] = _build_cont(self.url, container)
+            collection[id] = _build_cont(url, container)
         return Response(json=collection, status=200)
 
-    def show(self, request, id):
+    def show(self, request, url, id):
         """Return a presentation of a proc."""
         print "SHOW"
-        return Response(json=_build_cont(self.url, self._get(id)), status=200)
+        return Response(json=_build_cont(url, self._get(id)), status=200)
 
-    def delete(self, request, id):
+    def delete(self, request, url, id):
         """Stop and delete process."""
         container = self._get(id)
         self.store.remove(container.id)
@@ -102,24 +184,39 @@ class ContResource(object):
 class API(object):
     """The REST API that we expose."""
 
-    def __init__(self, log, store, environ):
-        self.mapper = Mapper()
-        self.url = URLGenerator(self.mapper, environ)
+    def __init__(self, log, cont_store, run_store, mapper):
         self.resources = {
-            'container': ContResource(log, self.url, store)
+            'container': ContResource(log, cont_store),
+            'run': RunResource(log, run_store)
             }
-        self.mapper.collection("containers", "container",
+
+        mapper.collection("containers", "container",
                                controller='container',
                                path_prefix='/container',
                                collection_actions=['index', 'create'],
                                member_actions=['show', 'delete'],
                                formatted=False)
 
+        run_collection = mapper.collection("runs", "run",
+                               controller='run',
+                               path_prefix='/run',
+                               collection_actions=['index', 'create'],
+                               member_actions=['show', 'delete'],
+                               formatted=False)
+        run_collection.member.link(
+            'commit', 'commit', action='commit',
+            method='POST', formatted=False)
+        run_collection.member.link(
+            'attach', 'attach', action='attach',
+            method='POST', formatted=False)
+
+
     @wsgify
     def __call__(self, request):
-        route = self.mapper.match(request.path, request.environ)
-        if route is None:
+        # handle incoming call.  depends on the routes middleware.
+        url, match = request.environ['wsgiorg.routing_args']
+        if match is None:
             raise HTTPNotFound()
-        resource = self.resources[route.pop('controller')]
-        action = route.pop('action')
-        return getattr(resource, action)(request, **route)
+        resource = self.resources[match.pop('controller')]
+        action = match.pop('action')
+        return getattr(resource, action)(request, url, **match)

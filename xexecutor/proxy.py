@@ -90,10 +90,13 @@ class ProxyApp(object):
             # Build path
             path = url.geturl().replace('%s://%s' % (url.scheme, url.netloc),
                                         '')
-        except Exception:
+        except Exception, err:
             start_response('501 Gateway Error', [('Content-Type', 'text/html')])
             logger.exception('Could not Connect')
             yield '<H1>Could not connect</H1>'
+            print err
+            import traceback
+            traceback.print_exc()
             return
 
         # Read in request body if it exists

@@ -26,22 +26,40 @@ class _ProxyResolver(object):
         self.registry = registry
         self._form_caches = {}
 
+    def _resolve_any(self, instances, service):
+        """Resolve to any instance for a formation."""
+        return [inst for inst in instances
+                if inst['service'] == service]
+    
+    def _resolve_one(self, instances, service, instance):
+        """."""
+        return [inst for inst in instances
+                if inst['service'] == service
+                and inst['instance'] == instance]
+
     def _resolve(self, host, port):
         """Resolve host and port."""
+        print "RESOLVE", host, port
         parts = host.split('.')
-        if len(parts) != 3:
-            raise ValueError("expected format <service>.<formation>.service")
-        service, form_name = parts[:2]
-        if not form_name in self._form_caches:
-            self._form_caches[form_name] = self.registry.formation_cache(
-                form_name)
-        instances = [inst for inst in self._form_caches[form_name].query().values()
-                     if inst['service'] == service]
+        service, formation = parts[-3:-1]
+        if not formation in self._form_caches:
+            self._form_caches[formation] = self.registry.formation_cache(
+                formation)
+        q = self._form_caches[formation].query().values()
+        print len(parts)
+        if len(parts) == 3:
+            instances = self._resolve_any(q, service)
+        elif len(parts) == 4:
+            instances = self._resolve_one(q, service, parts[0])
+            print "returned"
         if not instances:
+            print "NO INSTSANCES"
             raise ValueError("no instances")
+        print "GOT INSTANCES", instances
 
         instance = random.choice(instances)
         if str(port) not in instance['ports']:
+            print "NO PORTS"
             raise ValueError("instance do not expose port")
         
         netloc = '%s:%s' % (instance['host'], instance['ports'][str(port)])
@@ -55,15 +73,19 @@ class _ProxyResolver(object):
         except ValueError:
             host, port = netloc, 80
         if not host.endswith('.service'):
+            print "NO ENDY"
             return netloc
         return self._resolve(host, port)
 
 
 class PlatformRuntime(object):
 
-    def __init__(self, registry, container):
+    def __init__(self, registry, srnodes, container, tty=False, attach=False):
         self.registry = registry
         self.container = container
+        self.srnodes = srnodes
+        self.tty = tty
+        self.attach = attach
         self._resolve = _ProxyResolver(self.registry)
         self._init()
 
@@ -78,20 +100,23 @@ class PlatformRuntime(object):
         """Given a L{Container}, construct a Docker config."""
         return self._container_config(self.container.image,
             self.container.command, hostname=self.container.instance,
-            environment=self._make_environment())
+            environment=self._make_environment(), tty=self.tty,
+            stdin_open=self.attach)
 
     def _make_environment(self):
         proxy_netloc = '%s:%d' % (_DOCKER_GATEWAY, self._proxy.server_port)
         environment = self.container.env or {}
         environment = environment.copy()
-        environment.update({
-                'GILLIAM_FORMATION': self.container.formation,
-                'GILLIAM_SERVICE': self.container.service,
-                'GILLIAM_INSTANCE': self.container.instance,
-                'HTTP_PROXY': proxy_netloc,
-                'http_proxy': proxy_netloc,
-                'HTTPS_PROXY': proxy_netloc
-                })
+        for (n, v) in (
+            ('GILLIAM_FORMATION', self.container.formation),
+            ('GILLIAM_SERVICE', self.container.service),
+            ('GILLIAM_INSTANCE', self.container.instance),
+            ('GILLIAM_SERVICE_REGISTRY_NODES', self.srnodes),
+            ('HTTP_PROXY', proxy_netloc),
+            ('http_proxy', proxy_netloc),
+            ('HTTPS_PROXY', proxy_netloc)):
+            if v is not None:
+                environment[n] = v
         return _convert_environment_dict_to_array(environment)
 
     def _container_config(self, image, command, hostname=None, user=None,
@@ -107,9 +132,9 @@ class PlatformRuntime(object):
             'Tty':          tty,
             'OpenStdin':    stdin_open,
             'Memory':       mem_limit,
-            'AttachStdin':  False,
-            'AttachStdout': False,
-            'AttachStderr': False,
+            'AttachStdin':  self.attach,
+            'AttachStdout': self.attach,
+            'AttachStderr': self.attach,
             'Env':          environment,
             'Cmd':          command,
             'Dns':          dns,
@@ -133,12 +158,12 @@ def _port_mappings_from_inspect_data(data):
 class Container(object):
     """."""
 
-    def __init__(self, docker, runtime, discovery, host,
+    def __init__(self, docker, runtime, registry, host,
                  image, command, env,
                  formation, service, instance):
         self.docker = docker
         self.runtime = runtime
-        self.discovery = discovery
+        self.registry = registry
         self.host = host
         self.id = shortuuid.uuid()
         self.log = logging.getLogger('container:%s' % (self.id,))
@@ -157,25 +182,41 @@ class Container(object):
         self._runtime = None
 
     def start(self):
+        self.log.info("start called")
         gevent.spawn(self._provision_and_start)
         return self
 
     def dispose(self):
         """Dispose of the container."""
-        if not self._stopped.isSet():
+        if not self._stopped.is_set():
             if self._cont_id is not None:
                 self.docker.stop(self._cont_id)
             self._stopped.set()
 
+    def commit(self, repository, tag):
+        data = self.docker.inspect_container(self._cont_id)
+        self.docker.commit(self._cont_id, repository=repository, tag=tag,
+                           conf=data['Config'])
+
+    def attach(self, input, logs=0, stream=1):
+        """Attach to container."""
+        params = {'stdout': 1, 'stderr': 1, 'stream': stream, 'logs': logs}
+        socket = self.docker.attach_socket(self._cont_id, params, input)
+        while True:
+            chunk = socket.recv(4096)
+            if chunk:
+                yield chunk
+            else:
+                break
+
     def _register_with_service_registry(self):
         data = self.docker.inspect_container(self._cont_id)
-        announcement = {
-            'formation': self.formation, 'service': self.service,
-            'instance': self.instance, 'host': self.host,
-            'ports': dict(_port_mappings_from_inspect_data(data))
-            }
-        self._registration = self.discovery.register(
-            self.formation, self.instance, announcement)
+        announcement = self.registry.build_announcement(
+            self.formation, self.service, self.instance,
+            dict(_port_mappings_from_inspect_data(data)),
+            host=self.host)
+        self._registration = self.registry.register(
+            self.formation, self.service, self.instance, announcement)
     
     def _provision_and_start(self):
         with self._update_state('pulling'):
@@ -183,15 +224,17 @@ class Container(object):
         with self._update_state('running'):
             self._create_container()
 
-        self._register_with_service_registry()
+        if self.registry is not None:
+            self._register_with_service_registry()
 
         self.status_code = self.docker.wait(self._cont_id)
 
         # kill the container completely and invalidate our handle.
-        cont_id, self._cont_id = self._cont_id, None
+        #cont_id, self._cont_id = self._cont_id, None
         with self._update_state('done'):
-            self._registration.stop(timeout=10)
-            self.docker.kill(cont_id)
+            if self._registration is not None:
+                self._registration.stop(timeout=10)
+            self.docker.kill(self._cont_id)
             self._runtime.dispose()
 
     def _create_container(self):

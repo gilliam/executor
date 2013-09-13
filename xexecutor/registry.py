@@ -149,3 +149,40 @@ class ServiceRegistryClient(object):
         up to date until stopped.
         """
         return _FormationCache(self, form_name, factory, interval).start()
+
+    def _resolve_port(self, d, port):
+        if str(port) not in d['ports']:
+            raise ValueError("instance do not expose port")
+        return d['ports'][str(port)]
+
+    # FIXME: refactor
+
+    def _resolve_any(self, port, formation, service):
+        alts = [d for (k, d) in self.query_formation(formation)
+                if k.startswith(service + '.')]
+        if not alts:
+            raise Exception("no instances")
+        alt = random.choice(alts)
+        return alt['host'], self._resolve_port(alt, port)
+
+    def _resolve_specific(self, port, formation, service, name):
+        alts = [d for (k, d) in self.query_formation(formation)
+                if k.startswith(service + '.' + name)]
+        if not alts:
+            raise Exception("no instances")
+        alt = random.choice(alts)
+        return alt['host'], self._resolve_port(alt, port)
+
+    def resolve(self, url):
+        """Resolve a URL into a direct url."""
+        u = urlparse.urlsplit(url)
+        assert u.hostname.endswith('.service'), "must end with .service"
+        parts = u.hostname.split('.')
+        if len(parts) == 4:
+            hostname, port = self._resolve_specific(u.port, parts[2],
+                                                    parts[1], parts[0])
+        elif len(parts) == 3:
+            hostname, port = self._resolve_any(u.port, parts[1], parts[0])
+        netloc = '%s:%d' % (hostname, port)
+        return urlparse.urlunsplit((u.scheme, netloc, u.path,
+                                    u.query, u.fragment))

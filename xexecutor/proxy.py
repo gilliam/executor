@@ -153,7 +153,6 @@ class ProxyApp(object):
                    for key, value in hopped_headers
                    if not is_hop_by_hop(key)]
 
-        print headers
         start_response('{0.status} {0.reason}'.format(response), headers)
         while True:
             chunk = response.read(4096)

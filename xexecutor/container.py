@@ -6,9 +6,11 @@ import random
 from gevent.event import Event
 from gevent.wsgi import WSGIServer
 import gevent
+from gilliam.service_registry import Resolver as ServiceRegistryResolver
 import six
 import shortuuid
 import json
+
 
 from xexecutor.proxy import ProxyApp
 
@@ -23,59 +25,15 @@ class _ProxyResolver(object):
     """Class that resolves host names for the proxy."""
 
     def __init__(self, registry):
-        self.registry = registry
-        self._form_caches = {}
-
-    def _resolve_any(self, instances, service):
-        """Resolve to any instance for a formation."""
-        return [inst for inst in instances
-                if inst['service'] == service]
-    
-    def _resolve_one(self, instances, service, instance):
-        """."""
-        return [inst for inst in instances
-                if inst['service'] == service
-                and inst['instance'] == instance]
-
-    def _resolve(self, host, port):
-        """Resolve host and port."""
-        print "RESOLVE", host, port
-        parts = host.split('.')
-        service, formation = parts[-3:-1]
-        if not formation in self._form_caches:
-            self._form_caches[formation] = self.registry.formation_cache(
-                formation)
-        q = self._form_caches[formation].query().values()
-        print len(parts)
-        if len(parts) == 3:
-            instances = self._resolve_any(q, service)
-        elif len(parts) == 4:
-            instances = self._resolve_one(q, service, parts[0])
-            print "returned"
-        if not instances:
-            print "NO INSTSANCES"
-            raise ValueError("no instances")
-        print "GOT INSTANCES", instances
-
-        instance = random.choice(instances)
-        if str(port) not in instance['ports']:
-            print "NO PORTS"
-            raise ValueError("instance do not expose port")
-        
-        netloc = '%s:%s' % (instance['host'], instance['ports'][str(port)])
-        print "Resolved to %s" % (netloc,)
-        return netloc
+        self.resolver = ServiceRegistryResolver(registry)
 
     def __call__(self, netloc):
-        print "try to resolve %s" % (netloc,)
         try:
             host, port = netloc.split(':', 1)
         except ValueError:
             host, port = netloc, 80
-        if not host.endswith('.service'):
-            print "NO ENDY"
-            return netloc
-        return self._resolve(host, port)
+        host, port = self.resolver.resolve_host_port(host, int(port))
+        return '%s:%d' % (host, port)
 
 
 class PlatformRuntime(object):
@@ -112,6 +70,7 @@ class PlatformRuntime(object):
             ('GILLIAM_SERVICE', self.container.service),
             ('GILLIAM_INSTANCE', self.container.instance),
             ('GILLIAM_SERVICE_REGISTRY_NODES', self.srnodes),
+            ('GILLIAM_SERVICE_REGISTRY', self.srnodes),
             ('HTTP_PROXY', proxy_netloc),
             ('http_proxy', proxy_netloc),
             ('HTTPS_PROXY', proxy_netloc)):

@@ -71,7 +71,8 @@ class RunResource(object):
         data = self._assert_request_data(request, 'image', 'command',
             'formation')
         container = self.store.create(data['image'], data['command'],
-            data.get('env', {}), data['formation']).start()
+            data.get('env', {}), data.get('ports', []),
+            data['formation']).start()
         response = Response(json=_build_proc(url, container), status=201)
         response.headers.add('Location', url('run', id=container.id,
                                              qualified=True))
@@ -137,8 +138,8 @@ class ContResource(object):
         data = self._assert_request_data(request, 'image', 'command',
             'formation', 'service', 'instance')
         container = self.store.create(data['image'], data['command'],
-            data.get('env', {}), data['formation'], data['service'],
-            data['instance']).start()
+            data.get('env', {}), data.get('ports', []),
+            data['formation'], data['service'], data['instance']).start()
         response = Response(json=_build_cont(url, container), status=201)
         response.headers.add('Location', url('container', id=container.id,
                                              qualified=True))

@@ -53,16 +53,20 @@ class PlatformRuntime(object):
 
     def dispose(self):
         self._proxy.stop()
+
+    def _make_port_specs(self, ports):
+        return [str(port) for port in ports]
     
     def make_config(self):
         """Given a L{Container}, construct a Docker config."""
+        ports = self._make_port_specs(self.container.ports)
         return self._container_config(self.container.image,
             self.container.command, hostname=self.container.instance,
             environment=self._make_environment(), tty=self.tty,
-            stdin_open=self.attach)
+            stdin_open=self.attach, ports=ports)
 
     def _make_environment(self):
-        proxy_netloc = '%s:%d' % (_DOCKER_GATEWAY, self._proxy.server_port)
+        proxy_netloc = 'http://%s:%d' % (_DOCKER_GATEWAY, self._proxy.server_port)
         environment = self.container.env or {}
         environment = environment.copy()
         for (n, v) in (
@@ -118,7 +122,7 @@ class Container(object):
     """."""
 
     def __init__(self, docker, runtime, registry, host,
-                 image, command, env,
+                 image, command, env, ports,
                  formation, service, instance):
         self.docker = docker
         self.runtime = runtime
@@ -129,6 +133,7 @@ class Container(object):
         self.image = image
         self.command = command
         self.env = env
+        self.ports = ports
         self.formation = formation
         self.service = service
         self.instance = instance

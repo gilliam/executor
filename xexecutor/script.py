@@ -90,8 +90,8 @@ def main():
     # set-up runtime and store for the one-off containers:
     proc_runtime = partial(PlatformRuntime, service_registry, options.registry_nodes,
                            tty=False, attach=True)
-    proc_factory = lambda image, command, env, formation: Container(
-        docker, proc_runtime, None, None, image, command, env,
+    proc_factory = lambda image, command, env, ports, formation: Container(
+        docker, proc_runtime, None, None, image, command, env, ports,
         formation, None, shortuuid.uuid())
     proc_store = ContainerStore(proc_factory)
 

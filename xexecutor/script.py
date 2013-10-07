@@ -22,9 +22,12 @@ from optparse import OptionParser
 import json
 import os
 
+
+
 from docker import Client as DockerClient
 from glock.clock import Clock
 from gilliam.service_registry import ServiceRegistryClient
+from geventwebsocket.handler import WebSocketHandler
 from routes.middleware import RoutesMiddleware
 from routes import Mapper
 import shortuuid
@@ -36,11 +39,12 @@ from xexecutor.container import ContainerStore, Container, PlatformRuntime
 class App(object):
     """Class that holds functionality wiring for things together."""
 
-    def __init__(self, clock, cont_store, run_store, register,
+    def __init__(self, clock, cont_store, run_store, docker, register,
                  announcement):
         self.clock = clock
         self.cont_store = cont_store
         self.run_store = run_store
+        self.docker = docker
         self.register = register
         self.announcement = announcement
         self._reg = None
@@ -53,7 +57,7 @@ class App(object):
         """Create and return API WSGI application."""
         mapper = Mapper()
         return RoutesMiddleware(API(logging.getLogger('api'), self.cont_store,
-                   self.run_store, mapper), mapper, use_method_override=False,
+                   self.run_store, self.docker, mapper), mapper, use_method_override=False,
                    singleton=False)
 
 
@@ -71,14 +75,14 @@ def main():
 
     # logging
     format = '%(levelname)-8s %(name)s: %(message)s'
-    logging.basicConfig(level=logging.DEBUG, format=format)
+    logging.basicConfig(level=logging.INFO, format=format)
 
     formation = os.getenv('GILLIAM_FORMATION', 'executor')
     service = os.getenv('GILLIAM_SERVICE', 'api')
     instance = shortuuid.uuid()
     clock = Clock()
 
-    docker = DockerClient()
+    docker = DockerClient('http://localhost:3000')
     service_registry_cluster_nodes = options.registry_nodes.split(',')
     service_registry = ServiceRegistryClient(
         clock, service_registry_cluster_nodes)
@@ -89,10 +93,10 @@ def main():
 
     # set-up runtime and store for the one-off containers:
     proc_runtime = partial(PlatformRuntime, service_registry, options.registry_nodes,
-                           tty=False, attach=True)
-    proc_factory = lambda image, command, env, ports, formation: Container(
-        docker, proc_runtime, None, None, image, command, env, ports,
-        formation, None, shortuuid.uuid())
+                           attach=True)
+    proc_factory = lambda image, command, env, ports, opts, formation, **kw: Container(
+        docker, proc_runtime, None, None, image, command, env, ports, opts,
+        formation, None, shortuuid.uuid(), restart=False, **kw)
     proc_store = ContainerStore(proc_factory)
 
     register = partial(service_registry.register, formation, service, instance)
@@ -100,10 +104,11 @@ def main():
         formation, service, instance, ports={options.port: str(options.port)},
         host=options.host)
 
-    app = App(clock, cont_store, proc_store, register, announcement)
+    app = App(clock, cont_store, proc_store, docker, register, announcement)
     app.start()
 
-    pywsgi.WSGIServer(('', options.port), app.create_api()).serve_forever()
+    pywsgi.WSGIServer(('', options.port), app.create_api(),
+                      handler_class=WebSocketHandler).serve_forever()
 
 
 if __name__ == '__main__':

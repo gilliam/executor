@@ -17,7 +17,10 @@
 import httplib
 import logging
 import urlparse
-
+import socket
+import gevent
+import os
+import time
 
 # The set of hop-by-hop headers.  All header names all normalized to
 # lowercase.
@@ -79,9 +82,55 @@ class ProxyApp(object):
             resolver = lambda netloc: netloc
         self.resolver = resolver
 
+    def _handle_connect(self, environ, start_response):
+        """HTTP tunneling."""
+        netloc = self.resolver(environ['PATH_INFO'])
+        try:
+            hostname, port = netloc.split(':',1)
+            port = int(port)
+        except TypeError:
+            raise
+        except ValueError:
+            raise
+
+        sock = socket.socket()
+        sock.connect((hostname, port))
+
+        def _forward(dst, src):
+            while True:
+                data = src.recv(4096)
+                if data:
+                    dst.sendall(data)
+                else:
+                    break
+
+        write = start_response('200 OK', [('Connection', 'close')])
+        write('')
+
+        from gevent.fileobject import FileObject, SocketAdapter
+
+        input = SocketAdapter(os.dup(environ['wsgi.input'].rfile.fileno()),
+                           'rb')
+        gevent.spawn(_forward, sock, input)
+        try:
+            while True:
+                data = sock.recv(4096)
+                if data:
+                    yield data
+                else:
+                    break
+        finally:
+            sock.close()
+
     def handler(self, environ, start_response):
         """Proxy for requests to the actual http server"""
         logger = logging.getLogger(__name__ + '.WSGIProxyApplication.handler')
+
+        if environ['REQUEST_METHOD'] == 'CONNECT':
+            for data in self._handle_connect(environ, start_response):
+                yield data
+            return
+
         url = urlparse.urlparse(reconstruct_url(environ))
 
         # Create connection object

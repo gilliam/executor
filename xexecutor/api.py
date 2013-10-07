@@ -22,6 +22,10 @@ from webob.dec import wsgify
 from webob.exc import HTTPBadRequest, HTTPNotFound
 import gevent
 
+from docker import APIError
+
+from . import util
+
 
 def _build_cont(url, container):
     """Build a container representation.
@@ -35,6 +39,7 @@ def _build_cont(url, container):
                 service=container.service,
                 instance=container.instance,
                 env=container.env,
+                ports=container.ports,
                 image=container.image,
                 command=container.command,
                 state=container.state,
@@ -71,19 +76,46 @@ class RunResource(object):
         data = self._assert_request_data(request, 'image', 'command',
             'formation')
         container = self.store.create(data['image'], data['command'],
-            data.get('env', {}), data.get('ports', []),
-            data['formation']).start()
+            data.get('env', {}), data.get('ports', []), data.get('opts', {}),
+            data['formation'], tty=data.get('tty', False)).start()
         response = Response(json=_build_proc(url, container), status=201)
         response.headers.add('Location', url('run', id=container.id,
                                              qualified=True))
         return response
 
     def attach(self, request, url, id):
+        """Attach to container."""
+        instream = request.environ.get('wsgi.websocket')
+        if instream is None:
+            raise HTTPBadRequest()
+
         container = self._get(id)
-        app_iter = container.attach(request.body_file)
-        response = Response(status=200)
-        response.app_iter = app_iter
-        return response
+        upstream = container.attach(
+            stdin=True, stdout=True, stderr=True, stream=True,
+            logs=request.params.get('logs'))
+
+        def _sender():
+            while True:
+                data = instream.receive()
+                if data:
+                    upstream.send_binary(data)
+                else:
+                    break
+
+        def _recver():
+            while True:
+                data = upstream.recv()
+                if data:
+                    instream.send(data, binary=True)
+                else:
+                    break
+
+        sender = gevent.spawn(_sender)
+        recver = gevent.spawn(_recver)
+        gevent.joinall([sender, recver])
+
+        # DONE
+        instream.close()
 
     def commit(self, request, url, id):
         container = self._get(id)
@@ -107,6 +139,12 @@ class RunResource(object):
         container = self._get(id)
         self.store.remove(container.id)
         container.dispose()
+        return Response(status=204)
+
+    def resize(self, request, url, id):
+        container = self._get(id)
+        container.resize(int(request.params.get('w')),
+                         int(request.params.get('h')))
         return Response(status=204)
 
     def _assert_request_data(self, request, *required):
@@ -138,13 +176,23 @@ class ContResource(object):
         data = self._assert_request_data(request, 'image', 'command',
             'formation', 'service', 'instance')
         container = self.store.create(data['image'], data['command'],
-            data.get('env', {}), data.get('ports', []),
+            data.get('env', {}), data.get('ports', []), data.get('opts', {}),
             data['formation'], data['service'], data['instance']).start()
         response = Response(json=_build_cont(url, container), status=201)
         response.headers.add('Location', url('container', id=container.id,
                                              qualified=True))
         return response
 
+    def update(self, request, url, id):
+        """Update container."""
+        data = self._assert_request_data(request, 'image', 'command')
+        container = self._get(id)
+        container.restart(data['image'], data['command'],
+                          data.get('env', {}),
+                          data.get('ports', []))
+        response = Response(json=_build_cont(url, container), status=200)
+        return response
+        
     def index(self, request, url):
         """Return a representation of all procs."""
         collection = {}
@@ -154,7 +202,6 @@ class ContResource(object):
 
     def show(self, request, url, id):
         """Return a presentation of a proc."""
-        print "SHOW"
         return Response(json=_build_cont(url, self._get(id)), status=200)
 
     def delete(self, request, url, id):
@@ -162,12 +209,6 @@ class ContResource(object):
         container = self._get(id)
         self.store.remove(container.id)
         container.dispose()
-        return Response(status=204)
-
-    def resize(self, request, url, id):
-        container = self._get(id)
-        container.resize(int(request.params.get('w')),
-                         int(request.params.get('h')))
         return Response(status=204)
 
     def _assert_request_data(self, request, *required):
@@ -188,21 +229,58 @@ class ContResource(object):
         return container
 
 
+class ImageResource(object):
+    """Resource that provides functionality for managing images."""
+
+    def __init__(self, log, docker):
+        self.log = log
+        self.docker = docker
+
+    def push_image(self, request, url):
+        """Handle request for pushing an image to a registry.
+
+        The request specifies `repository`, `tag` and optionally
+        `auth`.
+        """
+        data = self._assert_request_data(request, 'repository', 'tag')
+        auth = data.get('auth', {})
+        self.docker.push('%s:%s' % (data['repository'], data['tag']),
+                         auth)
+        # FIXME: make this call asynchronous
+        return Response(status=204)
+        
+    def _assert_request_data(self, request, *required):
+        try:
+            data = request.json
+        except ValueError:
+            raise HTTPBadRequest()
+        if data is None:
+            raise HTTPBadRequest()
+        for key in required:
+            if not key in data:
+                raise HTTPBadRequest()
+        return data
+
+
 class API(object):
     """The REST API that we expose."""
 
-    def __init__(self, log, cont_store, run_store, mapper):
+    def __init__(self, log, cont_store, run_store, docker, mapper):
         self.resources = {
             'container': ContResource(log, cont_store),
-            'run': RunResource(log, run_store)
+            'run': RunResource(log, run_store),
+            'image': ImageResource(log, docker)
             }
 
         mapper.collection("containers", "container",
-                               controller='container',
-                               path_prefix='/container',
-                               collection_actions=['index', 'create'],
-                               member_actions=['show', 'delete'],
-                               formatted=False)
+                          controller='container',
+                          path_prefix='/container',
+                          collection_actions=['index', 'create'],
+                          member_actions=['show', 'delete', 'update'],
+                          formatted=False)
+
+        mapper.connect("push_image", "/_push_image", action='push_image',
+                    controller='image', conditions=dict(method='POST'))
 
         run_collection = mapper.collection("runs", "run",
                                controller='run',
@@ -217,12 +295,16 @@ class API(object):
             'resize', 'resize', action='resize',
             method='POST', formatted=False)
 
+        # websocket
+        run_collection.member.link(
+            'attach', 'attach', action='attach',
+            method='GET', formatted=False)
 
     @wsgify
     def __call__(self, request):
         # handle incoming call.  depends on the routes middleware.
         url, match = request.environ['wsgiorg.routing_args']
-        if match is None:
+        if match is None or 'controller' not in match:
             raise HTTPNotFound()
         resource = self.resources[match.pop('controller')]
         action = match.pop('action')

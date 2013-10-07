@@ -38,11 +38,10 @@ class _ProxyResolver(object):
 
 class PlatformRuntime(object):
 
-    def __init__(self, registry, srnodes, container, tty=False, attach=False):
+    def __init__(self, registry, srnodes, container, attach=False):
         self.registry = registry
         self.container = container
         self.srnodes = srnodes
-        self.tty = tty
         self.attach = attach
         self._resolve = _ProxyResolver(self.registry)
         self._init()
@@ -62,7 +61,7 @@ class PlatformRuntime(object):
         ports = self._make_port_specs(self.container.ports)
         return self._container_config(self.container.image,
             self.container.command, hostname=self.container.instance,
-            environment=self._make_environment(), tty=self.tty,
+            environment=self._make_environment(), tty=self.container.tty,
             stdin_open=self.attach, ports=ports)
 
     def _make_environment(self):
@@ -105,7 +104,7 @@ class PlatformRuntime(object):
             'Volumes':      volumes,
             'VolumesFrom':  volumes_from,
         }
-        print "CONFIG", d
+        #print "CONFIG", d
         return d
 
 
@@ -122,8 +121,9 @@ class Container(object):
     """."""
 
     def __init__(self, docker, runtime, registry, host,
-                 image, command, env, ports,
-                 formation, service, instance):
+                 image, command, env, ports, options,
+                 formation, service, instance,
+                 restart=True, tty=False):
         self.docker = docker
         self.runtime = runtime
         self.registry = registry
@@ -134,21 +134,33 @@ class Container(object):
         self.command = command
         self.env = env
         self.ports = ports
+        self.options = options
         self.formation = formation
         self.service = service
         self.instance = instance
         self.state = 'init'
+        self.tty = tty
         self.reason = None
         self.status_code = None
         self._stopped = Event()
         self._cont_id = None
         self._registration = None
         self._runtime = None
+        self._restart = restart
 
     def start(self):
         self.log.info("start called")
         gevent.spawn(self._provision_and_start)
         return self
+
+    def restart(self, image, command, env, ports):
+        self.image = image
+        self.command = command
+        self.env = env
+        self.ports = ports
+        self.status_code = None
+        if self._cont_id:
+            self.docker.stop(self._cont_id)
 
     def dispose(self):
         """Dispose of the container."""
@@ -162,16 +174,21 @@ class Container(object):
         self.docker.commit(self._cont_id, repository=repository, tag=tag,
                            conf=data['Config'])
 
-    def attach(self, input, logs=0, stream=1):
+    def attach(self, stdin=True, stdout=True, stderr=True,
+               stream=True, logs=False):
         """Attach to container."""
-        params = {'stdout': 1, 'stderr': 1, 'stream': stream, 'logs': logs}
-        socket = self.docker.attach_socket(self._cont_id, params, input)
-        while True:
-            chunk = socket.recv(4096)
-            if chunk:
-                yield chunk
-            else:
-                break
+        _int = lambda v: 1 if v else 0
+        params = {
+            'stdin': _int(stdin),
+            'stdout': _int(stdout),
+            'stderr': _int(stderr),
+            'stream': _int(stream),
+            'logs': _int(logs)
+            }
+        return self.docker.attach_websocket(self._cont_id, params)
+
+    def resize(self, w, h):
+        return self.docker.resize_tty(self._cont_id, w, h)
 
     def _register_with_service_registry(self):
         data = self.docker.inspect_container(self._cont_id)
@@ -183,21 +200,29 @@ class Container(object):
             self.formation, self.service, self.instance, announcement)
     
     def _provision_and_start(self):
-        with self._update_state('pulling'):
-            self.docker.pull(self.image)
-        with self._update_state('running'):
-            self._create_container()
+        while not self._stopped.is_set():
+            with self._update_state('pulling'):
+                self.log.debug("start pulling %r" % (self.image,))
+                self.docker.pull(self.image)
 
-        if self.registry is not None:
-            self._register_with_service_registry()
+            with self._update_state('starting'):
+                self._create_container()
+            self._set_state('running')
 
-        self.status_code = self.docker.wait(self._cont_id)
+            if self.registry is not None:
+                self._register_with_service_registry()
+
+            self.status_code = self.docker.wait(self._cont_id)
+            if self._registration is not None:
+                self._registration.stop(timeout=5)
+                self._registration = None
+
+            if not self._restart:
+                break
 
         # kill the container completely and invalidate our handle.
         #cont_id, self._cont_id = self._cont_id, None
         with self._update_state('done'):
-            if self._registration is not None:
-                self._registration.stop(timeout=10)
             self.docker.kill(self._cont_id)
             self._runtime.dispose()
 
@@ -209,15 +234,18 @@ class Container(object):
         self._cont_id = result['Id']
         self.docker.start(self._cont_id)
 
-    @contextmanager
-    def _update_state(self, state):
+    def _set_state(self, state):
         self.log.info('change state to %s from %s' % (state, self.state))
         self.state = state
+
+    @contextmanager
+    def _update_state(self, state):
+        self._set_state(state)
         try:
             yield
         except Exception, err:
             self.reason = str(err)
-            self.state = 'error'
+            self._set_state('error')
             self.log.error('error: %s' % (self.reason,))
             raise
 

@@ -164,6 +164,12 @@ class ContResource(object):
         container.dispose()
         return Response(status=204)
 
+    def resize(self, request, url, id):
+        container = self._get(id)
+        container.resize(int(request.params.get('w')),
+                         int(request.params.get('h')))
+        return Response(status=204)
+
     def _assert_request_data(self, request, *required):
         if not request.json:
             raise HTTPBadRequest()
@@ -208,7 +214,7 @@ class API(object):
             'commit', 'commit', action='commit',
             method='POST', formatted=False)
         run_collection.member.link(
-            'attach', 'attach', action='attach',
+            'resize', 'resize', action='resize',
             method='POST', formatted=False)
 
 

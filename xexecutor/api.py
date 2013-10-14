@@ -242,12 +242,12 @@ class ImageResource(object):
         The request specifies `repository`, `tag` and optionally
         `auth`.
         """
-        data = self._assert_request_data(request, 'repository', 'tag')
-        auth = data.get('auth', {})
-        self.docker.push('%s:%s' % (data['repository'], data['tag']),
-                         auth)
-        # FIXME: make this call asynchronous
-        return Response(status=204)
+        data = self._assert_request_data(request, 'image')
+        auth = data.get('auth') or {}
+        iter = self.docker.push(data['image'], auth)
+        response = Response(status=200)
+        response.app_iter = iter
+        return response
         
     def _assert_request_data(self, request, *required):
         try:

@@ -64,8 +64,10 @@ class App(object):
 def main():
     parser = OptionParser()
     parser.add_option("-s", "--service-registry",
-                      dest="registry_nodes", default='',
+                      dest="registry_nodes",
+                      default=os.getenv('GILLIAM_SERVICE_REGISTRY', ''),
                       help="service registry nodes", metavar="HOSTS")
+    parser.add_option('--name', dest="name")
     parser.add_option("-p", "--port", dest="port", type=int,
                       help="listen port", metavar="PORT", default=9000)
     parser.add_option('--host', dest="host", default=None,
@@ -79,10 +81,12 @@ def main():
 
     formation = os.getenv('GILLIAM_FORMATION', 'executor')
     service = os.getenv('GILLIAM_SERVICE', 'api')
-    instance = shortuuid.uuid()
+    instance = options.name or shortuuid.uuid()
     clock = Clock()
 
-    docker = DockerClient('http://localhost:3000')
+    base_url = os.getenv('DOCKER')
+    docker = DockerClient(base_url) if base_url else DockerClient()
+
     service_registry_cluster_nodes = options.registry_nodes.split(',')
     service_registry = ServiceRegistryClient(
         clock, service_registry_cluster_nodes)

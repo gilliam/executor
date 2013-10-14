@@ -222,7 +222,6 @@ class ContResource(object):
 
     def _get(self, id):
         """Return container with given ID or C{None}."""
-        print "GET", id
         container = self.store.lookup(id)
         if container is None:
             raise HTTPNotFound()

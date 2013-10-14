@@ -1,11 +1,13 @@
 Routes
 WebOb
 gevent
+gevent-websocket
 git+https://github.com/jrydberg/python-circuit.git
 glock
 pyee
 WebTest
 mockito
 nose
-docker-py
+git+https://github.com/gilliam/gilliam-py.git
+git+https://github.com/gilliam/docker-py.git
 shortuuid

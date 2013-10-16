@@ -8,5 +8,6 @@ ADD . /app
 WORKDIR /app
 RUN pip install -r requirements.txt
 EXPOSE 9000:9000
+EXPOSE 9001:9001
 ENV PYTHONPATH /app
 ENTRYPOINT ["bin/executor"]

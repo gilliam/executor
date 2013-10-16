@@ -33,7 +33,9 @@ from routes import Mapper
 import shortuuid
 
 from xexecutor.api import API
-from xexecutor.container import ContainerStore, Container, PlatformRuntime
+from xexecutor.container import (ContainerStore, Container, PlatformRuntime,
+                                 _ProxyResolver)
+from xexecutor.proxy import ProxyApp
 
 
 class App(object):
@@ -70,6 +72,8 @@ def main():
     parser.add_option('--name', dest="name")
     parser.add_option("-p", "--port", dest="port", type=int,
                       help="listen port", metavar="PORT", default=9000)
+    parser.add_option("--proxy-port", dest="proxy_port", type=int,
+                      metavar="PORT", default=9001)
     parser.add_option('--host', dest="host", default=None,
                       help="public hostname", metavar="HOST")
     (options, args) = parser.parse_args()
@@ -91,13 +95,19 @@ def main():
     service_registry = ServiceRegistryClient(
         clock, service_registry_cluster_nodes)
 
-    cont_runtime = partial(PlatformRuntime, service_registry, options.registry_nodes)
+    resolver = _ProxyResolver(service_registry)
+    proxy_server = pywsgi.WSGIServer(('', options.proxy_port), ProxyApp(resolver))
+    proxy_server.start()
+
+    cont_runtime = partial(PlatformRuntime, options.host, options.proxy_port,
+                           service_registry, options.registry_nodes)
     cont_store = ContainerStore(partial(Container, docker, cont_runtime,
                                         service_registry, options.host))
 
+
     # set-up runtime and store for the one-off containers:
-    proc_runtime = partial(PlatformRuntime, service_registry, options.registry_nodes,
-                           attach=True)
+    proc_runtime = partial(PlatformRuntime, options.host, options.proxy_port,
+                           service_registry, options.registry_nodes, attach=True)
     proc_factory = lambda image, command, env, ports, opts, formation, **kw: Container(
         docker, proc_runtime, None, None, image, command, env, ports, opts,
         formation, None, shortuuid.uuid(), restart=False, **kw)

@@ -14,8 +14,6 @@ import json
 
 from xexecutor.proxy import ProxyApp
 
-_DOCKER_GATEWAY = '172.17.42.1'
-
 
 def _convert_environment_dict_to_array(environment):
     return ['%s=%s' % (k, v) for (k, v) in environment.items()]
@@ -38,20 +36,17 @@ class _ProxyResolver(object):
 
 class PlatformRuntime(object):
 
-    def __init__(self, registry, srnodes, container, attach=False):
+    def __init__(self, proxy_host, proxy_port, registry, srnodes,
+                 container, attach=False):
+        self.proxy_host = proxy_host
+        self.proxy_port = proxy_port
         self.registry = registry
         self.container = container
         self.srnodes = srnodes
         self.attach = attach
-        self._resolve = _ProxyResolver(self.registry)
-        self._init()
-
-    def _init(self):
-        self._proxy = WSGIServer(('', 0), ProxyApp(self._resolve))
-        self._proxy.start()
 
     def dispose(self):
-        self._proxy.stop()
+        pass
 
     def _make_port_specs(self, ports):
         return [str(port) for port in ports]
@@ -65,7 +60,7 @@ class PlatformRuntime(object):
             stdin_open=self.attach, ports=ports)
 
     def _make_environment(self):
-        proxy_netloc = 'http://%s:%d' % (_DOCKER_GATEWAY, self._proxy.server_port)
+        proxy_netloc = 'http://%s:%d' % (self.proxy_host, self.proxy_port)
         environment = self.container.env or {}
         environment = environment.copy()
         for (n, v) in (

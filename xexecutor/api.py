@@ -16,6 +16,8 @@
 
 import uuid
 from functools import partial
+import json
+
 from routes import Mapper, URLGenerator
 from webob import Response
 from webob.dec import wsgify
@@ -228,6 +230,24 @@ class ContResource(object):
         return container
 
 
+# The docker daemon sends JSON documents as status, but without any
+# separator.  This adds separators.
+
+def _add_separators(it, sep='\n'):
+    decoder = json.JSONDecoder()
+    pending = ''
+    for chunk in it:
+        pending = pending + chunk
+        while True:
+            try:
+                status, index = decoder.raw_decode(pending)
+            except ValueError:
+                break
+            else:
+                yield pending[:index] + sep
+                pending = pending[index:]
+
+
 class ImageResource(object):
     """Resource that provides functionality for managing images."""
 
@@ -245,7 +265,7 @@ class ImageResource(object):
         auth = data.get('auth') or {}
         iter = self.docker.push(data['image'], auth)
         response = Response(status=200)
-        response.app_iter = iter
+        response.app_iter = _add_separators(iter)
         return response
         
     def _assert_request_data(self, request, *required):

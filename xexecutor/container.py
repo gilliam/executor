@@ -183,11 +183,16 @@ class Container(object):
         self._registration = None
         self._runtime = None
         self._restart = restart
+        self._reset()
 
     def start(self):
         self.log.info("start called")
         gevent.spawn(self._provision_and_start)
         return self
+
+    def _reset(self):
+        self._delay = 1
+        self._waiting = None
 
     def restart(self, image, command, env, ports):
         self.image = image
@@ -197,13 +202,15 @@ class Container(object):
         self.status_code = None
         if self._cont_id:
             self.docker.stop(self._cont_id)
+        elif self._waiting:
+            self._waiting.set()
 
     def dispose(self):
         """Dispose of the container."""
         if not self._stopped.is_set():
+            self._stopped.set()
             if self._cont_id is not None:
                 self.docker.stop(self._cont_id)
-            self._stopped.set()
 
     def commit(self, repository, tag):
         data = self.docker.inspect_container(self._cont_id)
@@ -255,12 +262,28 @@ class Container(object):
 
             if not self._restart:
                 break
+            elif not self._stopped.is_set():
+                self._set_error(
+                    "container stopped unexpectedly: exit code {0}".format(
+                        self.status_code))
+                self._pause()
 
         # kill the container completely and invalidate our handle.
         #cont_id, self._cont_id = self._cont_id, None
         with self._update_state('done'):
             self.docker.kill(self._cont_id)
             self._runtime.dispose()
+
+    def _pause(self):
+        self._delay = min(180, self._delay * 2.71828)
+        self.log.info("will wait for {0:.1f} seconds before restarting".format(
+                self._delay))
+        with self._update_state('error'):
+            try:
+                self._waiting = Event()
+                self._waiting.wait(self._delay)
+            finally:
+                self._waiting = None
 
     def _create_container(self):
         """Create container."""

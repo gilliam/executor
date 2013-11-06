@@ -163,7 +163,9 @@ class Container(object):
         self.registry = registry
         self.host = host
         self.id = shortuuid.uuid()
-        self.log = logging.getLogger('container:%s' % (self.id,))
+        cmd = ' '.join(command) if isinstance(command, list) else command
+        self.log = logging.getLogger('container[{0}/{1}.{2} (image={3}, command="{4}")]'.format(
+                formation, service, instance, image, cmd))
         self.image = image
         self.command = command
         self.env = env
@@ -272,15 +274,18 @@ class Container(object):
         self.log.info('change state to %s from %s' % (state, self.state))
         self.state = state
 
+    def _set_error(self, reason):
+        self.reason = reason
+        self._set_state('error')
+        self.log.warning('error: {0}'.format(self.reason))
+
     @contextmanager
     def _update_state(self, state):
         self._set_state(state)
         try:
             yield
         except Exception, err:
-            self.reason = str(err)
-            self._set_state('error')
-            self.log.error('error: %s' % (self.reason,))
+            self._set_error(str(err))
             raise
 
 

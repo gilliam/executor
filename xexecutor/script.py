@@ -76,12 +76,17 @@ def main():
                       metavar="PORT", default=9001)
     parser.add_option('--host', dest="host", default=None,
                       help="public hostname", metavar="HOST")
+    parser.add_option('-D', '--debug', dest="debug",
+                      default=False, action="store_true")
     (options, args) = parser.parse_args()
     assert options.host, "must specify host with --host"
 
     # logging
     format = '%(levelname)-8s %(name)s: %(message)s'
-    logging.basicConfig(level=logging.INFO, format=format)
+    debug = os.getenv('DEBUG') or options.debug
+    logging.basicConfig(
+        level=logging.DEBUG if debug else logging.INFO,
+        format=format)
 
     formation = os.getenv('GILLIAM_FORMATION', 'executor')
     service = os.getenv('GILLIAM_SERVICE', 'api')

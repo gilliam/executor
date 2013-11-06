@@ -19,6 +19,42 @@ def _convert_environment_dict_to_array(environment):
     return ['%s=%s' % (k, v) for (k, v) in environment.items()]
 
 
+def _split_port(port):
+    ip, host_port = None, None
+    port = str(port)
+    try:
+        ip, host_port, cont_port = port.split(':')
+    except (ValueError, TypeError):
+        try:
+            host_port, cont_port = port.split(':')
+        except (ValueError, TypeError):
+            cont_port = port
+    host_port = int(host_port) if host_port else None
+    cont_port = int(cont_port) if cont_port else None
+    return ip, host_port, cont_port
+
+
+def _convert_ports_to_exposed_ports(ports):
+    exposed_ports = {}
+    for port in ports:
+        host_ip, host_port, cont_port = _split_port(port)
+        port_key = '{0}/tcp'.format(cont_port)
+        exposed_ports[port_key] = {}
+    return exposed_ports
+
+
+def _convert_ports_to_port_bindings(ports):
+    bindings = {}
+    for port in ports:
+        host_ip, host_port, cont_port = _split_port(port)
+        port_key = '{0}/tcp'.format(cont_port)
+        bindings.setdefault(port_key, []).append({
+            'HostIp': host_ip or "0.0.0.0",
+            'HostPort': str(host_port) if host_port else ""
+            })
+    return bindings
+
+
 class _ProxyResolver(object):
     """Class that resolves host names for the proxy."""
 
@@ -84,6 +120,7 @@ class PlatformRuntime(object):
             command = shlex.split(str(command))
         d =  {
             'Hostname':     hostname,
+            'ExposedPorts': _convert_ports_to_exposed_ports(ports),
             'PortSpecs':    ports,
             'User':         user,
             'Tty':          tty,
@@ -107,9 +144,11 @@ def _port_mappings_from_inspect_data(data):
     """Return a port mapping announcement based on the data from
     the container.
     """
-    container_mappings = data['NetworkSettings']['PortMapping']['Tcp']
-    for source, forwarded in container_mappings.items():
-        yield str(source), str(forwarded)
+    container_mappings = data['NetworkSettings']['Ports']
+    for port_key, port_bindings in container_mappings.items():
+        port, protocol = port_key.split('/', 1)
+        if port_bindings:
+            yield str(port), str(port_bindings[0]['HostPort'])
 
 
 class Container(object):
@@ -227,7 +266,7 @@ class Container(object):
         result = self.docker.create_container_from_config(
             self._runtime.make_config())
         self._cont_id = result['Id']
-        self.docker.start(self._cont_id)
+        self.docker.start(self._cont_id, port_bindings=_convert_ports_to_port_bindings(self.ports))
 
     def _set_state(self, state):
         self.log.info('change state to %s from %s' % (state, self.state))
